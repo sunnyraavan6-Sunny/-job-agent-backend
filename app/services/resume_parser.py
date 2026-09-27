@@ -1,59 +1,163 @@
 """
-Rule-based parser that turns a plain-text master resume into a structured
-JSON shape (contact / summary / skills / experience / education / projects).
+Rule-based parser for the master resume.
 
-This is intentionally heuristic rather than ML-based: no external model
-download, fully deterministic, and easy for a human to audit. It will not
-be perfect on every resume layout -- that's why the parsed structure is
-stored and editable via PUT /resume-engine/master/parsed before it's ever
-used to generate a tailored resume. Nothing here invents content; it only
-reorganizes what's already in the raw text.
+The parser preserves the candidate's original resume facts and reorganizes
+them into a structured JSON shape used by the resume engine.
+
+Supported sections include:
+- Profile Summary
+- Technical Skills
+- Experience
+- Education
+- Technical Projects
+- Certifications
+- Soft Skills
+- Achievements
+
+Nothing is invented by this parser.
 """
+
 import re
 
+
 SECTION_ALIASES = {
-    "summary": ["summary", "profile", "objective", "about"],
-    "skills": ["skills", "technical skills", "core competencies", "technologies"],
-    "experience": ["experience", "work experience", "professional experience", "employment history"],
-    "education": ["education", "academic background"],
-    "projects": ["projects", "personal projects", "key projects"],
-    "certifications": ["certifications", "certificates", "licenses"],
+    "summary": [
+        "summary",
+        "profile",
+        "profile summary",
+        "objective",
+        "career objective",
+        "about",
+    ],
+    "skills": [
+        "skills",
+        "technical skills",
+        "technical skill",
+        "core competencies",
+        "technologies",
+    ],
+    "experience": [
+        "experience",
+        "work experience",
+        "professional experience",
+        "employment history",
+    ],
+    "education": [
+        "education",
+        "academic background",
+    ],
+    "projects": [
+        "projects",
+        "technical projects",
+        "technical project",
+        "personal projects",
+        "key projects",
+    ],
+    "certifications": [
+        "certifications",
+        "certificates",
+        "licenses",
+    ],
+    "soft_skills": [
+        "soft skills",
+        "soft skill",
+    ],
+    "achievements": [
+        "achievements",
+        "achievement",
+    ],
 }
 
+
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-PHONE_RE = re.compile(r"(\+?\d[\d\-\s()]{7,}\d)")
-LINKEDIN_RE = re.compile(r"(https?://)?(www\.)?linkedin\.com/\S+", re.IGNORECASE)
-GITHUB_RE = re.compile(r"(https?://)?(www\.)?github\.com/\S+", re.IGNORECASE)
-BULLET_RE = re.compile(r"^\s*[-•*▪●]\s*(.*)")
+
+PHONE_RE = re.compile(
+    r"(\+?\d[\d\-\s()]{7,}\d)"
+)
+
+LINKEDIN_RE = re.compile(
+    r"(https?://)?(www\.)?linkedin\.com/\S+",
+    re.IGNORECASE,
+)
+
+GITHUB_RE = re.compile(
+    r"(https?://)?(www\.)?github\.com/\S+",
+    re.IGNORECASE,
+)
+
+BULLET_RE = re.compile(
+    r"^\s*[-•*▪◦]\s*(.*)"
+)
 
 
-def _find_section_boundaries(lines: list[str]) -> list[tuple[str, int, int]]:
-    """Return list of (canonical_section_name, start_line, end_line) exclusive of headers."""
+def _normalize_header(line: str) -> str:
+    """
+    Normalize a section header for matching.
+
+    Examples:
+        PROFILE SUMMARY -> profile summary
+        TECHNICAL PROJECTS: -> technical projects
+    """
+    return line.strip().strip(":").strip().lower()
+
+
+def _find_section_boundaries(
+    lines: list[str],
+) -> list[tuple[str, int, int]]:
+    """
+    Find known resume section headers and return:
+
+        (canonical_section_name, start_line, end_line)
+
+    The header itself is excluded from the section content.
+    """
+
     header_positions = []
+
     for i, line in enumerate(lines):
-        clean = line.strip().strip(":").lower()
-        if not clean or len(clean) > 40:
+        clean = _normalize_header(line)
+
+        if not clean or len(clean) > 50:
             continue
+
         for canonical, aliases in SECTION_ALIASES.items():
-            if clean in aliases or (clean.isupper() and clean.lower() in aliases):
+            if clean in aliases:
                 header_positions.append((canonical, i))
                 break
 
     boundaries = []
+
     for idx, (name, start) in enumerate(header_positions):
-        end = header_positions[idx + 1][1] if idx + 1 < len(header_positions) else len(lines)
-        boundaries.append((name, start + 1, end))
+        if idx + 1 < len(header_positions):
+            end = header_positions[idx + 1][1]
+        else:
+            end = len(lines)
+
+        boundaries.append(
+            (name, start + 1, end)
+        )
+
     return boundaries
 
 
-def _extract_contact(text: str, lines: list[str]) -> dict:
+def _extract_contact(
+    text: str,
+    lines: list[str],
+) -> dict:
+    """
+    Extract contact information from the complete resume text.
+    """
+
     email_match = EMAIL_RE.search(text)
     phone_match = PHONE_RE.search(text)
     linkedin_match = LINKEDIN_RE.search(text)
     github_match = GITHUB_RE.search(text)
 
-    # Best-effort: the candidate's name is usually the first non-empty line
-    name = next((l.strip() for l in lines[:5] if l.strip()), None)
+    # The candidate's name is normally the first non-empty line.
+    name = next(
+        (line.strip() for line in lines[:5] if line.strip()),
+        None,
+    )
 
     return {
         "name": name,
@@ -64,44 +168,161 @@ def _extract_contact(text: str, lines: list[str]) -> dict:
     }
 
 
-def _parse_skills_block(block_lines: list[str]) -> list[str]:
-    text = " ".join(block_lines)
-    # split on commas, bullets, pipes, semicolons
-    raw_items = re.split(r"[,;|•\n]", text)
-    skills = [item.strip(" -*\t") for item in raw_items if item.strip(" -*\t")]
-    # de-dupe while preserving order
+def _clean_item(value: str) -> str:
+    """
+    Remove common bullet/whitespace characters.
+    """
+
+    return value.strip(" -*•▪◦\t")
+
+
+def _parse_skills_block(
+    block_lines: list[str],
+) -> list[str]:
+    """
+    Parse technical skills.
+
+    Handles both:
+
+        Python, SQL, Power BI
+
+    and:
+
+        Programming: Python
+        Libraries: Pandas, NumPy, Matplotlib
+        Databases: SQL/MySQL
+        Data Visualization & BI: Power BI, Tableau, Excel
+    """
+
+    skills = []
+
+    for raw_line in block_lines:
+        line = _clean_item(raw_line)
+
+        if not line:
+            continue
+
+        # Example:
+        # Programming: Python
+        # Libraries: Pandas, NumPy
+        if ":" in line:
+            _, value = line.split(":", 1)
+            line = value.strip()
+
+        # Normalize common separators.
+        items = re.split(r"[,;|]", line)
+
+        for item in items:
+            item = _clean_item(item)
+
+            if not item:
+                continue
+
+            # Preserve SQL/MySQL as separate useful skills.
+            if "/" in item:
+                slash_items = [
+                    _clean_item(x)
+                    for x in item.split("/")
+                    if _clean_item(x)
+                ]
+            else:
+                slash_items = [item]
+
+            for skill in slash_items:
+                if 1 <= len(skill) <= 80:
+                    skills.append(skill)
+
+    # De-duplicate while preserving original order.
     seen = set()
     result = []
-    for s in skills:
-        key = s.lower()
-        if key not in seen and 1 <= len(s) <= 60:
+
+    for skill in skills:
+        key = skill.lower()
+
+        if key not in seen:
             seen.add(key)
-            result.append(s)
+            result.append(skill)
+
     return result
 
 
-def _parse_bulleted_entries(block_lines: list[str]) -> list[dict]:
+def _parse_simple_list(
+    block_lines: list[str],
+) -> list[str]:
     """
-    Generic parser for experience/project/education blocks: groups lines into
-    entries, where a non-bulleted line starts a new entry (title/company/date
-    line) and subsequent bulleted lines are that entry's bullet points.
+    Parse sections such as soft skills and achievements.
     """
-    entries: list[dict] = []
+
+    result = []
+
+    for raw_line in block_lines:
+        line = _clean_item(raw_line)
+
+        if not line:
+            continue
+
+        # If a line contains comma-separated items, preserve them as
+        # individual entries.
+        items = re.split(r"[,;|]", line)
+
+        for item in items:
+            item = _clean_item(item)
+
+            if item:
+                result.append(item)
+
+    # De-duplicate while preserving order.
+    seen = set()
+    output = []
+
+    for item in result:
+        key = item.lower()
+
+        if key not in seen:
+            seen.add(key)
+            output.append(item)
+
+    return output
+
+
+def _parse_bulleted_entries(
+    block_lines: list[str],
+) -> list[dict]:
+    """
+    Generic parser for experience/project/education blocks.
+
+    A non-bulleted line starts a new entry.
+    Bulleted lines following it become that entry's bullets.
+    """
+
+    entries = []
     current = None
 
     for raw_line in block_lines:
         line = raw_line.rstrip()
+
         if not line.strip():
             continue
 
         bullet_match = BULLET_RE.match(line)
+
         if bullet_match:
             if current is None:
-                current = {"header": "", "bullets": []}
+                current = {
+                    "header": "",
+                    "bullets": [],
+                }
                 entries.append(current)
-            current["bullets"].append(bullet_match.group(1).strip())
+
+            current["bullets"].append(
+                bullet_match.group(1).strip()
+            )
+
         else:
-            current = {"header": line.strip(), "bullets": []}
+            current = {
+                "header": line.strip(),
+                "bullets": [],
+            }
             entries.append(current)
 
     return entries
@@ -109,61 +330,190 @@ def _parse_bulleted_entries(block_lines: list[str]) -> list[dict]:
 
 def _split_header(header: str) -> dict:
     """
-    Best-effort split of a header line like:
-      "Backend Engineer, Acme Corp | Jan 2022 - Present"
-    into title / organization / dates. Falls back gracefully if the format
-    doesn't match -- the full header text is always preserved.
+    Best-effort split of headers containing title, organization and dates.
+
+    The complete original header is always preserved in raw_header.
     """
+
     dates = None
+
     date_match = re.search(
-        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*\d{4}|\d{4})\s*[-–—to]+\s*"
-        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*\d{4}|\d{4}|Present|Current)",
+        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+        r"[a-z]*\.?\s*\d{4}|\d{4})"
+        r"\s*[-–—to]+\s*"
+        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+        r"[a-z]*\.?\s*\d{4}|\d{4}|Present|Current)",
         header,
         re.IGNORECASE,
     )
+
     if date_match:
         dates = date_match.group(0)
-        header_wo_dates = header.replace(dates, "").strip(" |,-")
+
+        header_without_dates = header.replace(
+            dates,
+            "",
+        ).strip(" |,-")
+
     else:
-        header_wo_dates = header
+        header_without_dates = header
 
-    parts = re.split(r"[,|]| at ", header_wo_dates)
-    parts = [p.strip() for p in parts if p.strip()]
-    title = parts[0] if parts else header_wo_dates
-    organization = parts[1] if len(parts) > 1 else None
+    parts = re.split(
+        r"[,|]|\s+at\s+",
+        header_without_dates,
+    )
 
-    return {"raw_header": header, "title": title, "organization": organization, "dates": dates}
+    parts = [
+        part.strip()
+        for part in parts
+        if part.strip()
+    ]
+
+    title = (
+        parts[0]
+        if parts
+        else header_without_dates
+    )
+
+    organization = (
+        parts[1]
+        if len(parts) > 1
+        else None
+    )
+
+    return {
+        "raw_header": header,
+        "title": title,
+        "organization": organization,
+        "dates": dates,
+    }
 
 
-def parse_master_resume(raw_text: str) -> dict:
+def parse_master_resume(
+    raw_text: str,
+) -> dict:
+    """
+    Convert raw master-resume text into structured JSON.
+
+    The returned keys remain compatible with resume_builder.py while also
+    preserving soft skills and achievements from the candidate's resume.
+    """
+
     lines = raw_text.splitlines()
+
     boundaries = _find_section_boundaries(lines)
-    sections = {name: lines[start:end] for name, start, end in boundaries}
 
-    contact = _extract_contact(raw_text, lines)
+    sections = {
+        name: lines[start:end]
+        for name, start, end in boundaries
+    }
 
-    summary_lines = sections.get("summary", [])
-    summary = " ".join(l.strip() for l in summary_lines if l.strip())
+    contact = _extract_contact(
+        raw_text,
+        lines,
+    )
 
-    skills = _parse_skills_block(sections.get("skills", []))
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
 
-    experience_raw = _parse_bulleted_entries(sections.get("experience", []))
+    summary_lines = sections.get(
+        "summary",
+        [],
+    )
+
+    summary = " ".join(
+        line.strip()
+        for line in summary_lines
+        if line.strip()
+    )
+
+    # ------------------------------------------------------------------
+    # Technical Skills
+    # ------------------------------------------------------------------
+
+    skills = _parse_skills_block(
+        sections.get("skills", [])
+    )
+
+    # ------------------------------------------------------------------
+    # Experience
+    # ------------------------------------------------------------------
+
+    experience_raw = _parse_bulleted_entries(
+        sections.get("experience", [])
+    )
+
     experience = [
-        {**_split_header(e["header"]), "bullets": e["bullets"]} for e in experience_raw if e["header"] or e["bullets"]
+        {
+            **_split_header(entry["header"]),
+            "bullets": entry["bullets"],
+        }
+        for entry in experience_raw
+        if entry["header"] or entry["bullets"]
     ]
 
-    projects_raw = _parse_bulleted_entries(sections.get("projects", []))
+    # ------------------------------------------------------------------
+    # Projects
+    # ------------------------------------------------------------------
+
+    projects_raw = _parse_bulleted_entries(
+        sections.get("projects", [])
+    )
+
     projects = [
-        {"name": e["header"], "bullets": e["bullets"]} for e in projects_raw if e["header"] or e["bullets"]
+        {
+            "name": entry["header"],
+            "bullets": entry["bullets"],
+        }
+        for entry in projects_raw
+        if entry["header"] or entry["bullets"]
     ]
 
-    education_raw = _parse_bulleted_entries(sections.get("education", []))
+    # ------------------------------------------------------------------
+    # Education
+    # ------------------------------------------------------------------
+
+    education_raw = _parse_bulleted_entries(
+        sections.get("education", [])
+    )
+
     education = [
-        {**_split_header(e["header"]), "bullets": e["bullets"]} for e in education_raw if e["header"] or e["bullets"]
+        {
+            **_split_header(entry["header"]),
+            "bullets": entry["bullets"],
+        }
+        for entry in education_raw
+        if entry["header"] or entry["bullets"]
     ]
 
-    certifications_lines = sections.get("certifications", [])
-    certifications = [l.strip(" -*\t") for l in certifications_lines if l.strip()]
+    # ------------------------------------------------------------------
+    # Certifications
+    # ------------------------------------------------------------------
+
+    certifications = _parse_simple_list(
+        sections.get("certifications", [])
+    )
+
+    # ------------------------------------------------------------------
+    # Soft Skills
+    # ------------------------------------------------------------------
+
+    soft_skills = _parse_simple_list(
+        sections.get("soft_skills", [])
+    )
+
+    # ------------------------------------------------------------------
+    # Achievements
+    # ------------------------------------------------------------------
+
+    achievements = _parse_simple_list(
+        sections.get("achievements", [])
+    )
+
+    # ------------------------------------------------------------------
+    # Final structured resume
+    # ------------------------------------------------------------------
 
     return {
         "contact": contact,
@@ -173,4 +523,6 @@ def parse_master_resume(raw_text: str) -> dict:
         "education": education,
         "projects": projects,
         "certifications": certifications,
+        "soft_skills": soft_skills,
+        "achievements": achievements,
     }

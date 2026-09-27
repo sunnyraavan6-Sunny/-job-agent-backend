@@ -1,0 +1,91 @@
+\documentclass[10.5pt,letterpaper]{article}
+\usepackage[margin=0.65in]{geometry}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{fontenc}[T1]
+
+\pagestyle{empty}
+\setlist[itemize]{leftmargin=*, noitemsep, topsep=0pt, itemsep=1pt}
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{4pt}
+\newcommand{\entryheader}[3]{%
+  \textbf{#1} \hfill #3 \\
+  \textit{#2}
+}
+
+\begin{document}
+
+% ---- Header -----------------------------------------------------------
+\begin{center}
+  {\LARGE \textbf{\VAR{contact.name}}} \\[2pt]
+  \BLOCK{if contact.email}\href{mailto:\VAR{contact.email}}{\VAR{contact.email}}\BLOCK{endif}
+  \BLOCK{if contact.phone} \textbar\ \VAR{contact.phone}\BLOCK{endif}
+  \BLOCK{if contact.linkedin} \textbar\ \href{\VAR{contact.linkedin}}{LinkedIn}\BLOCK{endif}
+  \BLOCK{if contact.github} \textbar\ \href{\VAR{contact.github}}{GitHub}\BLOCK{endif}
+\end{center}
+
+% ---- Summary ------------------------------------------------------------
+\BLOCK{if summary}
+\section*{Summary}
+\VAR{summary}
+\BLOCK{endif}
+
+% ---- Skills ------------------------------------------------------------
+\BLOCK{if skills}
+\section*{Skills}
+\VAR{skills | join(', ')}
+\BLOCK{endif}
+
+% ---- Experience ----------------------------------------------------------
+\BLOCK{if experience}
+\section*{Experience}
+\BLOCK{for job in experience}
+\entryheader{\VAR{job.title or ''}}{\VAR{job.organization or ''}}{\VAR{job.dates or ''}}
+\begin{itemize}
+\BLOCK{for bullet in job.bullets}
+  \item \VAR{bullet}
+\BLOCK{endfor}
+\end{itemize}
+\BLOCK{endfor}
+\BLOCK{endif}
+
+% ---- Projects ------------------------------------------------------------
+\BLOCK{if projects}
+\section*{Projects}
+\BLOCK{for project in projects}
+\textbf{\VAR{project.name or ''}}
+\begin{itemize}
+\BLOCK{for bullet in project.bullets}
+  \item \VAR{bullet}
+\BLOCK{endfor}
+\end{itemize}
+\BLOCK{endfor}
+\BLOCK{endif}
+
+% ---- Education ------------------------------------------------------------
+\BLOCK{if education}
+\section*{Education}
+\BLOCK{for edu in education}
+\entryheader{\VAR{edu.title or ''}}{\VAR{edu.organization or ''}}{\VAR{edu.dates or ''}}
+\BLOCK{if edu.bullets}
+\begin{itemize}
+\BLOCK{for bullet in edu.bullets}
+  \item \VAR{bullet}
+\BLOCK{endfor}
+\end{itemize}
+\BLOCK{endif}
+\BLOCK{endfor}
+\BLOCK{endif}
+
+% ---- Certifications --------------------------------------------------------
+\BLOCK{if certifications}
+\section*{Certifications}
+\begin{itemize}
+\BLOCK{for cert in certifications}
+  \item \VAR{cert}
+\BLOCK{endfor}
+\end{itemize}
+\BLOCK{endif}
+
+\end{document}
